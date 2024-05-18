@@ -82,6 +82,8 @@ class TableView_main(QtWidgets.QDialog):
 
     def removeItem(self):
         index = self._ui.tableView.currentIndex()
+        if not index.isValid():
+            return
         row = index.row()
         self._tableModel.beginRemoveRows(self._ui.tableView.rootIndex(), row, row)
         if self._data:
