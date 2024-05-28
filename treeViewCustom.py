@@ -1,4 +1,4 @@
-import random, numbers
+import random, numbers, pickle
 from functools import partial
 
 from PyQt5 import QtCore, QtWidgets, QtGui
@@ -16,7 +16,9 @@ class MyTreeview(QtWidgets.QTreeView):
 
     def __init__(self, parent):
         super(MyTreeview, self).__init__(parent)
-        self._currentItem = None
+        self.setSelectionMode(self.SingleSelection)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+
 
     def mouseReleaseEvent(self, mouseEvent):
         if mouseEvent.button() != QtCore.Qt.LeftButton:
@@ -118,25 +120,36 @@ class ComboDelegate(QtWidgets.QStyledItemDelegate):
 # ========================================
 class TreeModel(QtCore.QAbstractItemModel):
 
+    itemDropped = QtCore.pyqtSignal(object)
+
     def __init__(self, data,  parent=None):
         super(TreeModel, self).__init__(parent)
-        self.rootItem = FileItem('root', 'root', None, None, None)
+        self.rootItem = FileItem('root', 'root', None, None)
         self.setup(data)
 
 
     def refresh(self):
         self.dataChanged.emit(QtCore.QModelIndex(), QtCore.QModelIndex())
 
-
     def getRootItem(self):
         return self.rootItem
     
+    def getItemFromIndex(self, index):
+        return index.internalPointer() if index.isValid() else self.rootItem
     
+
 # ---------- setup model with data given
     def setup(self, data):
+        def getFolderType(folderName):
+            fileTypes = {'Pictures': 'jpg',
+                         'Documents': 'doc',
+                         'Videos': 'MP4'}
+            return fileTypes[folderName.split('_')[0]]
+                    
         def setupFolderItems(data, parent):
             for keyName, dataA in data.items():
-                item = FileItem(keyName, 'folder', None, None, parent)
+                folderData = {'fileType':getFolderType(keyName)}
+                item = FileItem(keyName, 'folder', folderData, parent)
                 if isinstance(dataA, dict):
                     setupFolderItems(dataA, item)
                 else:
@@ -144,11 +157,10 @@ class TreeModel(QtCore.QAbstractItemModel):
 
         def setupFileItems(data, parent):
             for fileData in data:
-                option = random.sample(['Option1', 'Option2', 'Option3'], 1)[0]
-                FileItem(fileData['filename'], 'file', fileData, option, parent)
+                FileItem(fileData['filename'], 'file', fileData, parent)
 
         for keyName, folderData in data.items():
-            item = FileItem(keyName, 'usage', None, None, self.rootItem)
+            item = FileItem(keyName, 'usage', None, self.rootItem)
             setupFolderItems(folderData, item)
 
 
@@ -174,12 +186,16 @@ class TreeModel(QtCore.QAbstractItemModel):
         column = index.column()
         if column == 1 and not item.isUsage():
             return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsUserCheckable
+        
         if item.getType() == 'file':
             if 3 <= column <= 4:
-                return QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled 
-            return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEditable
+                return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsDragEnabled #| QtCore.Qt.ItemIsDropEnabled
+            return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsDragEnabled #| QtCore.Qt.ItemIsDropEnabled
+        
+        if item.getType() == 'folder':
+            return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsDropEnabled
         return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
-
+        
 
     def data(self, index, role):
         if not index.isValid():
@@ -255,7 +271,7 @@ class TreeModel(QtCore.QAbstractItemModel):
         end = start + 1
         
         self.beginInsertRows(parentIndex, start, end)
-        folderItem = FileItem(name, 'folder', None, None, parentItem)
+        folderItem = FileItem(name, 'folder', None, parentItem)
         self.endInsertRows()
         self.layoutChanged.emit()
 
@@ -274,13 +290,12 @@ class TreeModel(QtCore.QAbstractItemModel):
         end = start + 1
             
         self.beginInsertRows(parentIndex, start, end)
-        option = random.sample(['Option1', 'Option2', 'Option3'], 1)[0]
-        item = FileItem(data['filename'], 'file', data, option, parentItem)
+        item = FileItem(data['filename'], 'file', data, parentItem)
         self.endInsertRows()
         self.layoutChanged.emit()
 
         parentItem.updateParentCheckState()
-        return self.index(item.getRow(), 3, parentIndex)
+        return item
 
 
 # ---------- remove rows
@@ -295,6 +310,60 @@ class TreeModel(QtCore.QAbstractItemModel):
         self.layoutChanged.emit()
 
         parentItem.updateParentCheckState()
+
+
+# ---------- drag and drop 
+    def supportedDropActions(self):
+        return QtCore.Qt.MoveAction# | Qt.CopyAction
+
+    def mimeTypes(self):
+        return ['bstream', 'text/xml']
+
+
+    def mimeData(self, indexes):
+        mimedata = QtCore.QMimeData()
+        bstream = pickle.dumps(self.getItemFromIndex(indexes[0]))
+        mimedata.setData('bstream', bstream)
+        return mimedata
+
+
+    def dropMimeData(self, mimedata, action, row, column, parentIndex):
+        if action == QtCore.Qt.IgnoreAction: 
+            return True  
+
+        item = pickle.loads(mimedata.data('bstream'))
+        parentItem = self.getItemFromIndex(parentIndex)
+        if item.getFileType() != parentItem.getFileType():
+            return False
+        
+        item.setParent(parentItem)
+        self.insertRow(parentItem.childrenSize(), parentIndex)
+        parentItem.updateParentCheckState()
+        self.refresh()
+        self.itemDropped.emit(item)
+        return True
+
+
+    def insertRow(self, row, parent):
+        # print (f'Inserting row {row}')
+        return self.insertRows(row, 1, parent)
+    
+
+    def insertRows(self, row, count, parent):
+        # print (f'Inserting rowsssssss {row}')
+        self.beginInsertRows(parent, row, row)
+        self.endInsertRows()
+        return True
+
+
+    def removeRows(self, row, count, parentIndex):
+        # print (f'removing rowsssssss {row}')
+        self.beginRemoveRows(parentIndex, row, row)
+        parentItem = self.getItemFromIndex(parentIndex)
+        parentItem.removeChild(row)
+        parentItem.updateParentCheckState()
+        self.endRemoveRows()       
+        return True
 
 
 # ---------- don't touch
@@ -330,11 +399,10 @@ class TreeModel(QtCore.QAbstractItemModel):
 # data object for model's item
 # ========================================
 class FileItem():
-    def __init__(self, name, type, data, option, parent=None):
+    def __init__(self, name, type, data, parent=None):
         self._data = data
         self._name = name
         self._type = type
-        self._option = option
         self.checkedState = False
 
         self._parent = parent
@@ -343,42 +411,41 @@ class FileItem():
             self._parent.addChild(self)
 
 
+    def setName(self, name):
+        self._name = name
+
     def getName(self):
         return self._name
-
 
     def getType(self):
         return self._type
 
-
     def getOption(self):
-        return self._option
+        return self._data['option']
     
-
     def setOption(self, option):
-        self._option = option
+        self._data['option'] = option
         
+    def getFileType(self):
+        return self._data['fileType']
 
     def isUsage(self):
         return self._type == 'usage'
 
-
     def getData(self, column):
         if not self._data:
             return None
-        if column == 2:
+        if column == 2 and 'size' in self._data:
             return self._data['size']
-        if column == 3:
+        if column == 3 and 'fileType' in self._data:
             return self._data['fileType']
         return None
 
     def setData(self, column, value):
+        dataKeys = ['name', 'size', 'fileType', 'option']
         if column == 0:
             self._name = value
-        if column == 2:
-            self._data['size'] = value
-        elif column == 3:
-            self._data['fileType'] = value
+        self._data[dataKeys[column]] = value
 
 
     def setCheckedState(self, stateId):
@@ -424,10 +491,18 @@ class FileItem():
         return QtCore.Qt.Unchecked
 
 
+    def getCheckedStateID(self) :
+        return self.checkedState
+
+
 # ---------- 
     def getRow(self):
         return self._parent._children.index(self)
     
+    def setParent(self, parentItem):
+        self._parent = parentItem
+        self._parent.addChild(self)
+
     def getParent(self):
         return self._parent
     
@@ -447,4 +522,4 @@ class FileItem():
         self._children.append(child)
 
     def removeChild(self, idx):
-        del self._children[idx]
+        self._children.pop(idx)
